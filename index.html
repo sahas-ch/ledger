@@ -51,6 +51,17 @@ p{margin:0}
 .heroline{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 12px;font-size:.9rem;color:var(--muted)}
 .heroline b{font-family:var(--display);font-variant-numeric:tabular-nums;color:var(--ink);font-weight:700}
 .pos{color:var(--good)!important} .negc{color:var(--bad)!important}
+.bals{all:unset;box-sizing:border-box;width:100%;cursor:pointer;display:grid;grid-template-columns:repeat(auto-fit,minmax(60px,1fr));gap:8px;border-top:1px solid var(--line);padding-top:12px}
+.bals:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:6px}
+.bal{display:flex;flex-direction:column;gap:1px;min-width:0}
+.bn{font-size:.72rem;color:var(--muted);font-weight:600;white-space:nowrap}
+.bv{font-family:var(--display);font-variant-numeric:tabular-nums;font-weight:700;font-size:1rem;white-space:nowrap}
+.opt{all:unset;box-sizing:border-box;cursor:pointer;display:flex;flex-direction:column;gap:4px;width:100%;padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.opt b{font-family:var(--display);font-size:1.15rem;font-variant-numeric:tabular-nums}
+.opt span{font-size:.86rem;color:var(--muted)}
+.opt.off{opacity:.55;cursor:default}
+.opt:not(.off):hover{border-color:var(--accent)}
+.opt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 .alerts{display:flex;flex-direction:column;gap:8px}
 .alert{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:12px;font-size:.9rem}
@@ -373,10 +384,22 @@ function calc(M){
   const daysAfter=inMonth?diffDays(t,end):0;
   const safe=left-M.limit*daysAfter;          // safe to spend today, keeping the daily limit for every later day
   const todaySpent=inMonth?(SP[t]||0):0;
-  const ahead=inMonth?safe-(M.limit-todaySpent):safe; // the surplus counter: earlier days' under/overspending
-  const projected=Math.max(M.target,moved)+h.extra+h.backOld+Math.min(ahead,safe);
+  // ahead/behind: earlier days' under/overspending, plus today's overspend once you're past today's limit
+  const ahead=inMonth?safe-(M.limit-todaySpent)-Math.max(0,todaySpent-M.limit):safe;
+  const projected=Math.max(M.target,moved)+h.extra+h.backOld+ahead;
   const toMove=savingsLeft+h.extra+h.backOld+left;
   return {usable,dues,card,moved,savingsLeft,h,held,left,safe,todaySpent,ahead,projected,toMove,end,daysLeft:inMonth?daysAfter+1:0};
+}
+// One-tap Recalculate: absorb the ahead/behind amount into the daily limit or into the savings target.
+function rebalance(M,c){
+  const over=c.todaySpent>M.limit,n=Math.max(0,c.daysLeft-1);  // n = days after today
+  const days=over?n:n+1, pool=over?c.left:c.left+c.todaySpent; // past today's limit -> today counts as done
+  const D=Math.round(c.ahead);
+  const newLimit=days>0&&pool>=0?Math.floor(pool/days):null;
+  const floorT=Math.min(M.target,c.moved);                      // savings can't drop below what's already moved
+  const newTarget=D<0?Math.max(floorT,M.target+D):M.target+D;
+  return {D,over,days,newLimit,newTarget,covered:newTarget-M.target,
+    limitOK:newLimit!==null&&newLimit!==M.limit,targetOK:newTarget!==M.target};
 }
 function monthSpend(k){
   buildSP();
@@ -396,13 +419,13 @@ function monthSpend(k){
   for(const c in cats)if(cats[c]<0.5)delete cats[c];
   return {spent,cats};
 }
-function buildMonth(k,start,target,obligations,startTs){
-  const M={key:k,start,startTs,target,obligations,limit:0};
+function buildMonth(k,start,target,obligations,startTs,planBy){
+  const M={key:k,start,startTs,target,obligations,limit:0,planBy:planBy||'target',adj:[]};
   const c=calc(M);
   M.days=diffDays(start,monthEnd(k))+1;
   M.spendable=c.left;
   M.limit=Math.max(0,Math.floor(c.left/M.days));
-  M.plan={usable:c.usable,card:c.card,dues:c.dues,savings:c.savingsLeft,moved:c.moved,held:c.held,spendable:c.left};
+  M.plan={usable:c.usable,card:c.card,dues:c.dues,savings:c.savingsLeft,moved:c.moved,held:c.held,spendable:c.left,limit:M.limit,target};
   return M;
 }
 
@@ -413,7 +436,7 @@ function alerts(c){
   if(c.safe<0&&!(c.h.stipLate>=-c.safe)){
     const planShort=(M.plan?M.plan.spendable:M.spendable)<0;
     if(planShort&&M.limit===0)L.push({lvl:'bad',text:`Your dues and savings target need ${inr(-c.safe)} more than you have. Lower the target and re-plan.`,act:{label:'Re-plan',type:'replan'}});
-    else L.push({lvl:'bad',text:`You're ${inr(-c.safe)} past what's safe for today. Keep the next few days under ${inr(M.limit)} to catch up.`});
+    else L.push({lvl:'bad',text:`You're ${inr(-c.safe)} past what's safe for today. Recalculate, or keep the next few days under ${inr(M.limit)} to catch up.`,act:{label:'Recalculate',type:'rebal'}});
   }
   const yt=M.obligations.find(o=>o.kind==='yt'&&!o.paid);
   for(const id of ['gpay','paytm','phonepe']){
@@ -484,6 +507,9 @@ function viewToday(){
   const aheadTxt=ah>=1?`<b class="pos">+${inr(ah)}</b> ahead`:ah<=-1?`<b class="negc">${inr(-ah)}</b> behind`:'on track';
   const unpaid=M.obligations.filter(o=>!o.paid).sort((a,b)=>a.due.localeCompare(b.due));
   const recent=S.tx.filter(x=>x.type!=='adjust').sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,3);
+  const A=S.accounts,cell=(n,v,bad)=>`<span class="bal"><span class="bn">${n}</span><span class="bv ${bad?'negc':''}">${inr(v)}</span></span>`;
+  const bals=BANKS.map(id=>cell(esc(A[id].name),A[id].bal,A[id].floor&&A[id].bal<A[id].floor)).join('')+(S.cardDue>0?cell('Card owed',S.cardDue,false):'');
+  const showRb=Math.abs(ah)>=20&&c.daysLeft>0;
   return `${storeWarn()}
   <header class="top"><div><div class="eyebrow">${monthName(M.key)}</div><h1>${weekday(t)}, ${fmtD(t)}</h1></div><div class="top-meta">${c.daysLeft} day${c.daysLeft===1?'':'s'} left</div></header>
   <section class="hero" aria-label="Today">
@@ -491,6 +517,8 @@ function viewToday(){
     <div class="big ${c.safe<0?'neg':''}">${inr(c.safe)}</div>
     <div class="meter ${c.safe<0?'over':''}" aria-hidden="true"><span style="width:${pct}%"></span></div>
     <p class="heroline"><span><b>${inr(c.todaySpent)}</b> spent today</span><span><b>${inr(M.limit)}</b>/day · ${aheadTxt}</span></p>
+    ${showRb?`<button class="btn sm block" data-act="rebal">Recalculate limit or savings</button>`:''}
+    <button class="bals" data-tab="ledger" aria-label="Account balances. Opens the Ledger.">${bals}</button>
   </section>
   ${shown.length?`<section class="alerts" aria-label="Alerts">${shown.map((a,i)=>`<div class="alert ${a.lvl}"><p>${esc(a.text)}</p>${a.act?`<button class="btn sm" data-act="alertact" data-i="${i}">${esc(a.act.label)}</button>`:''}</div>`).join('')}${al.length>2&&!ui.allAlerts?`<button class="linkbtn" data-act="allalerts">Show ${al.length-2} more</button>`:''}</section>`:''}
   <section class="sec"><div class="sec-h"><h2>Next due</h2>${unpaid.length>1?`<button class="linkbtn" data-tab="month">All dues (${unpaid.length})</button>`:''}</div>
@@ -540,8 +568,9 @@ function viewMonth(){
   const fromSpend=Math.min(c.ahead,c.safe);
   return `<header class="top"><div><div class="eyebrow">Month plan</div><h1>${monthName(M.key)}</h1></div><button class="btn sm" data-act="replan">Re-plan</button></header>
   <section class="sec"><h2>How the daily limit was set</h2>
-  <div class="plan">${planLines}${pl('Spending budget',inr(P?P.spendable:M.spendable),'tot')}${pl(`÷ ${M.days} days from ${fmtD(M.start)}`,inr(M.limit)+'/day')}</div>
-  <p class="hint">The limit stays fixed. Re-plan if something big changes.</p></section>
+  <div class="plan">${planLines}${pl('Spending budget',inr(P?P.spendable:M.spendable),'tot')}${pl(`÷ ${M.days} days from ${fmtD(M.start)}`,inr(P&&P.limit!=null?P.limit:M.limit)+'/day')}
+    ${(M.adj||[]).map(a=>pl(`${fmtD(a.date)}: recalculated ${a.kind==='limit'?'daily limit':'savings target'}`,a.kind==='limit'?inr(a.to)+'/day':inr(a.to))).join('')}</div>
+  <p class="hint">${M.planBy==='limit'?'You set the daily limit; the savings target was worked out from it. ':''}Use Recalculate on Today when you're ahead or behind, or Re-plan if something big changes.</p></section>
   <section class="sec"><div class="sec-h"><h2>Dues</h2><span class="muted small">${inr(unpaidSum)} left to pay</span></div>
     <div class="list">${obl.length?obl.map(oblRow).join(''):'<div class="empty">No dues this month.</div>'}</div></section>
   <section class="sec"><div class="sec-h"><h2>Spending</h2><span class="muted small">${inr(ms.spent)} so far</span></div>
@@ -601,7 +630,9 @@ function viewMore(){
     </form></section>
   <section class="sec"><h2>How it works</h2><ul class="rules">
     <li><b>Safe to spend today</b> comes from your real balances: money above the minimums in GPay, Paytm and Cash, minus what the card is owed, unpaid dues, the savings still to set aside, and money kept aside (extra income, next month's stipend). The daily limit for each remaining day is held back too.</li>
-    <li>The daily limit is fixed for the month. Spend less and you get <b>ahead</b>; spend more and you fall <b>behind</b>. Either way it shows up in today's number.</li>
+    <li>When you plan a month, set either a <b>savings target</b> (the daily limit is worked out) or a <b>daily limit</b> (the savings are worked out).</li>
+    <li>The daily limit stays fixed. Spend less and you get <b>ahead</b>; spend more and you fall <b>behind</b>. Either way it shows up in today's number.</li>
+    <li><b>Recalculate</b> (on Today, when you're ₹20 or more ahead or behind) moves that amount into either the daily limit for the days left or this month's savings. You choose which.</li>
     <li>A balance check corrects the numbers too. Money you forgot to log, or a friend paying you back through a split, lands in the right place.</li>
     <li>Card spending counts on the day you spend. Paying the card bill never counts again.</li>
     <li>Money moved into PhonePe counts toward this month's savings target. Extra income goes to savings. A stipend is kept for the month it's for.</li>
@@ -669,15 +700,20 @@ function newSetup(k,start,replan,carry){
   const A=S.accounts;
   const obl=replan?S.month.obligations.map(o=>({...o})):[...defaultObligations(k),...(carry||[])];
   for(const o of obl)if(!o.paid&&o.due<start&&!['planned','move'].includes(o.kind))o.pre=!!o.auto;
+  const PM=S.month&&S.month.plan;
   return {k,start,replan,
     bal:Object.fromEntries(BANKS.map(id=>[id,r2(A[id].bal)])),card:r2(S.cardDue),
-    target:S.month?S.month.target:1500,obl};
+    planBy:(S.month&&S.month.planBy)||'target',
+    target:replan||!PM||PM.target==null?(S.month?S.month.target:1500):PM.target,
+    limitIn:replan||!PM||PM.limit==null?(S.month?S.month.limit:150):PM.limit,obl};
 }
 function readSetup(){
-  const s=ui.setup;if(!s||!$('#su-target'))return;
+  const s=ui.setup;if(!s||!$('#su-card'))return;
   BANKS.forEach(id=>{const v=num($('#su-bal-'+id).value);if(!isNaN(v))s.bal[id]=v;});
   const cv=num($('#su-card').value);if(!isNaN(cv))s.card=cv;
-  s.target=num($('#su-target').value)||0;
+  const ti=$('#su-target'),li=$('#su-limit');
+  if(ti)s.target=num(ti.value)||0;
+  if(li)s.limitIn=num(li.value)||0;
   s.obl.forEach(o=>{if(o.paid)return;const a=$('#su-oa-'+o.id),d=$('#su-od-'+o.id),n=$('#su-on-'+o.id),p=$('#su-op-'+o.id);
     if(a){const v=num(a.value);o.amount=isNaN(v)?0:v;} if(d&&d.value)o.due=d.value; if(n)o.name=n.value||'Planned purchase'; if(p)o.pre=p.checked;});
 }
@@ -685,18 +721,27 @@ function setupPreview(){
   const s=ui.setup;buildSP();
   const usable=SPEND_ACCTS.reduce((a,id)=>a+(s.bal[id]-S.accounts[id].floor),0);
   const dues=s.obl.filter(o=>!o.paid&&!o.pre&&o.kind!=='card').reduce((a,o)=>a+(+o.amount||0),0);
-  const moved=movedFor(s.k),savingsLeft=Math.max(0,s.target-moved);
+  const moved=movedFor(s.k);
   const h=heldFor({key:s.k,startTs:'9999'});const held=h.extra+h.backOld+h.stipNext;
   const days=diffDays(s.start,monthEnd(s.k))+1;
-  const sp=usable-s.card-dues-savingsLeft-held;
-  return {usable,card:s.card,dues,moved,savingsLeft,held,days,sp,limit:Math.max(0,Math.floor(sp/days))};
+  const base=usable-s.card-dues-held; // money for spending + savings this month
+  const common={usable,card:s.card,dues,moved,held,days,base};
+  if(s.planBy==='limit'){
+    const L=Math.max(0,Math.floor(s.limitIn||0)),saveLeft=base-L*days;
+    return {...common,mode:'limit',limit:L,saveLeft,ok:saveLeft>=0,target:moved+Math.floor(Math.max(0,saveLeft)),maxL:Math.max(0,Math.floor(base/days))};
+  }
+  const savingsLeft=Math.max(0,s.target-moved),sp=base-savingsLeft;
+  return {...common,mode:'target',savingsLeft,sp,ok:true,target:s.target,limit:Math.max(0,Math.floor(sp/days))};
 }
 function previewHTML(p){
-  return `<div class="pl"><span>Above minimums</span><b>${inr(p.usable)}</b></div>
+  const top=`<div class="pl"><span>Above minimums</span><b>${inr(p.usable)}</b></div>
   ${p.card?`<div class="pl"><span>Card owed</span><b>${sinr(-p.card)}</b></div>`:''}
   <div class="pl"><span>Other dues</span><b>${sinr(-p.dues)}</b></div>
-  <div class="pl"><span>${p.moved?'Savings still to set aside':'Savings target'}</span><b>${sinr(-p.savingsLeft)}</b></div>
-  ${p.held?`<div class="pl"><span>Kept aside (extra income, next month's stipend)</span><b>${sinr(-p.held)}</b></div>`:''}
+  ${p.held?`<div class="pl"><span>Kept aside (extra income, next month's stipend)</span><b>${sinr(-p.held)}</b></div>`:''}`;
+  if(p.mode==='limit')return top+`<div class="pl"><span>Spending ${inr(p.limit)} × ${p.days} days</span><b>${sinr(-p.limit*p.days)}</b></div>
+  <div class="pl tot"><span>Savings this month${p.moved?' (incl. '+inr(p.moved)+' already moved)':''}</span><b class="${p.ok?'pos':'negc'}">${inr(p.ok?p.target:p.saveLeft)}</b></div>
+  ${p.ok?'':`<div class="pl"><span class="negc">${inr(p.limit)}/day is more than you have. The most you can set is ${inr(p.maxL)}/day.</span></div>`}`;
+  return top+`<div class="pl"><span>${p.moved?'Savings still to set aside':'Savings target'}</span><b>${sinr(-p.savingsLeft)}</b></div>
   <div class="pl tot"><span>Daily limit (${p.days} days)</span><b class="${p.sp<0?'negc':''}">${inr(p.limit)}</b></div>
   ${p.sp<0?`<div class="pl"><span class="negc">Dues and savings are ${inr(-p.sp)} more than you have. Lower the target.</span></div>`:''}`;
 }
@@ -722,14 +767,20 @@ function viewSetup(){
     <h2>Dues this month</h2>
     ${s.obl.map(o=>oblSetupRow(o,s)).join('')}
     <button class="btn" type="button" data-act="addplanned">+ Add a planned purchase</button>
-    <h2>Savings target</h2>
-    <label class="field"><span>Amount to save this month</span><input id="su-target" inputmode="decimal" value="${s.target}"></label>
+    <h2>Plan by</h2>
+    <div class="chips" role="radiogroup" aria-label="Plan by"><label class="chip"><input type="radio" name="planBy" value="target" ${s.planBy!=='limit'?'checked':''}><span>Savings target</span></label><label class="chip"><input type="radio" name="planBy" value="limit" ${s.planBy==='limit'?'checked':''}><span>Daily limit</span></label></div>
+    ${s.planBy==='limit'
+      ?`<label class="field"><span>Daily limit (₹ per day)</span><input id="su-limit" inputmode="numeric" value="${s.limitIn}"></label><p class="hint">Your savings for the month are worked out from it.</p>`
+      :`<label class="field"><span>Amount to save this month</span><input id="su-target" inputmode="decimal" value="${s.target}"></label><p class="hint">Your daily limit is worked out from it.</p>`}
     <div class="plan" id="su-prev">${previewHTML(p)}</div>
     <button class="btn primary block" type="submit">Start ${s.replan?'new plan':monthName(s.k)}</button>
   </form>`;
 }
 function commitSetup(){
   readSetup();const s=ui.setup,ts=nowTs();
+  if(s.planBy==='limit'){const p=setupPreview();
+    if(!p.ok){toast(`${inr(p.limit)}/day is more than you have. The most you can set is ${inr(p.maxL)}/day.`);render();return false;}
+    s.target=p.target;}
   BANKS.forEach(id=>{const diff=r2(s.bal[id]-S.accounts[id].bal);if(diff)addTx({type:'adjust',acct:id,amt:diff,cls:'fix',note:'Balance at plan start',ts});});
   const cd=r2(s.card-S.cardDue);if(cd)addTx({type:'adjust',acct:'card',amt:cd,cls:'fix',note:'Balance at plan start',ts});
   const co=s.obl.find(o=>o.kind==='card'&&!o.paid);
@@ -738,9 +789,10 @@ function commitSetup(){
     else if(!s.obl.some(o=>o.kind==='card'))s.obl.push({id:uid(),kind:'card',name:'Credit card bill',amount:Math.round(S.cardDue),due:s.k+'-'+pad(Math.min(S.settings.cardDay,daysInMonth(s.k))),acct:'gpay',paid:false});
   }else if(co)s.obl=s.obl.filter(o=>o!==co);
   for(const o of s.obl){if(!o.paid&&o.pre){o.paid=true;o.paidAmt=o.amount;o.paidOn=o.due;o.outside=true;}delete o.pre;}
-  S.month=buildMonth(s.k,s.start,s.target,s.obl,ts);
+  S.month=buildMonth(s.k,s.start,s.target,s.obl,ts,s.planBy);
   S.lastReconcile=today();ui.mode=null;ui.setup=null;ui.tab='today';ui.allAlerts=false;
-  runAutopay();save();toast(`Daily limit set: ${inr(S.month.limit)}`);
+  runAutopay();save();toast(s.planBy==='limit'?`Daily limit ${inr(S.month.limit)}, savings ${inr(S.month.target)}`:`Daily limit set: ${inr(S.month.limit)}`);
+  return true;
 }
 
 /* ===================== sheets ===================== */
@@ -809,6 +861,17 @@ function sheetHTML(){
       return `<div class="oblrow"><b>${aname(d.acct)}: ${what} than the app</b><div class="chips">${reconOpts(d).map(([v,l])=>`<label class="chip"><input type="radio" name="c${i}" value="${v}" ${v===d.def?'checked':''}><span>${l}</span></label>`).join('')}</div></div>`;}).join('')}
       <p class="hint">Your balances get corrected either way. This decides how it counts: as spending, as savings, or as next month's money.</p>
       <button class="btn primary block" type="submit">Save</button></form>`;
+  }
+  if(sh.type==='rebal'){
+    const c=calc(M),r=rebalance(M,c),behind=r.D<0,amt=inr(Math.abs(r.D)),dl=r.days===1?'day':'days';
+    const optA=r.limitOK
+      ?`<button class="opt" data-act="rebalgo" data-k="limit"><b>Daily limit ${inr(M.limit)} → ${inr(r.newLimit)}</b><span>Savings stay ${inr(M.target)}. The ${amt} is spread over the ${r.days} ${dl} ${r.over?'after today':'left, including today'}.</span></button>`
+      :`<div class="opt off"><b>Daily limit can't change</b><span>${r.days<=0?'There are no days left after today.':r.newLimit===null?'There isn\'t enough money left for any daily limit.':'The change would be less than ₹1 a day.'}</span></div>`;
+    const part=behind&&-r.covered<-r.D?` This covers ${inr(-r.covered)} of it; savings can't go below what you've already moved.`:'';
+    const optB=r.targetOK
+      ?`<button class="opt" data-act="rebalgo" data-k="target"><b>Savings ${inr(M.target)} → ${inr(r.newTarget)}</b><span>Daily limit stays ${inr(M.limit)}.${part}</span></button>`
+      :`<div class="opt off"><b>Savings can't change</b><span>There's nothing left in this month's savings to take from.</span></div>`;
+    return head(behind?`You're ${amt} behind`:`You're ${amt} ahead`)+`<p class="hint">${behind?'Choose where the overspending comes from.':'Choose where the extra goes.'}${r.over?' Today counts as done, since you\'re past today\'s limit.':''}</p>${optA}${optB}<button class="btn block" data-act="close">Leave it as it is</button>`;
   }
   if(sh.type==='restore'){
     return head('Restore backup')+`<form class="sec" data-form="restore">
@@ -889,10 +952,16 @@ document.addEventListener('click',e=>{
       if(a.type==='transfer'){ui.editId=null;ui.addType='transfer';ui.prefill={from:a.from,to:a.to,amt:a.amt};openSheet({type:'add'});}
       else if(a.type==='pay')openSheet({type:'pay',id:a.id});
       else if(a.type==='reconcile')openSheet({type:'reconcile'});
+      else if(a.type==='rebal')openSheet({type:'rebal'});
       else if(a.type==='replan'){ui.mode='setup';ui.setup=newSetup(S.month.key,today(),true);render();window.scrollTo(0,0);}
       else if(a.type==='tab'){ui.tab=a.tab;render();window.scrollTo(0,0);}
       break;}
     case 'allalerts':ui.allAlerts=true;render();break;
+    case 'rebal':openSheet({type:'rebal'});break;
+    case 'rebalgo':{const M=S.month,r=rebalance(M,calc(M));M.adj=M.adj||[];
+      if(el.dataset.k==='limit'&&r.limitOK){M.adj.push({date:today(),kind:'limit',from:M.limit,to:r.newLimit});M.limit=r.newLimit;toast(`Daily limit is now ${inr(r.newLimit)}.`);}
+      else if(el.dataset.k==='target'&&r.targetOK){M.adj.push({date:today(),kind:'target',from:M.target,to:r.newTarget});M.target=r.newTarget;toast(`Savings target is now ${inr(r.newTarget)}.`);}
+      save();ui.sheet=null;render();break;}
     case 'row':ui.openRow=ui.openRow===el.dataset.id?null:el.dataset.id;render();break;
     case 'del':ui.undo=JSON.stringify(S);delTx(el.dataset.id);ui.openRow=null;save();toast('Entry deleted.',true);render();break;
     case 'undo':if(ui.undo){S=JSON.parse(ui.undo);ui.undo=null;ui.toast=null;save();toast('Restored.');render();}break;
@@ -926,6 +995,11 @@ document.addEventListener('change',e=>{
   if(t.name==='sub'){const b=$('#f-forbox');if(b)b.hidden=t.value!=='stipend';}
   if(t.id==='f-when')updateRecBox();
   if(t.dataset&&t.dataset.drop){ui.closeDrop[t.dataset.drop]=!t.checked;render();}
+  if(t.name==='planBy'&&ui.mode==='setup'&&ui.setup){ // switching carries the worked-out value across
+    readSetup();const s=ui.setup,p=setupPreview();
+    if(t.value==='limit'&&s.planBy!=='limit')s.limitIn=p.limit;
+    if(t.value==='target'&&s.planBy==='limit'&&p.ok)s.target=p.target;
+    s.planBy=t.value;render();const f=$(t.value==='limit'?'#su-limit':'#su-target');if(f)f.focus();}
 });
 document.addEventListener('submit',e=>{
   e.preventDefault();const f=e.target,fd=new FormData(f),kind=f.dataset.form;
@@ -1027,7 +1101,7 @@ document.addEventListener('submit',e=>{
     for(const id of ['gpay','paytm','phonepe']){const v=n('floor-'+id);if(!isNaN(v)&&v>=0)S.accounts[id].floor=v;}
     save();ui.mode='setup';ui.setup=newSetup(mkey(today()),today(),false);render();window.scrollTo(0,0);return;
   }
-  if(kind==='setup'){commitSetup();render();window.scrollTo(0,0);return;}
+  if(kind==='setup'){if(commitSetup()){render();window.scrollTo(0,0);}return;}
 });
 
 /* ===================== start ===================== */
